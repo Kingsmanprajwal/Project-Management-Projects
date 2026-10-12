@@ -8,6 +8,8 @@ const FB_URL = (m) => `https://www.gstatic.com/firebasejs/${FB_VERSION}/firebase
 const newId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 
 export const COLLECTIONS = ['notes', 'docs', 'tasks', 'people'];
+export const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB per uploaded file
+const CHUNK_BYTES = 750 * 1024; // stays under Firestore's 1 MiB per-document limit
 
 export async function createStore() {
   const store = firebaseConfig ? new FirebaseStore() : new LocalStore();
@@ -95,7 +97,49 @@ class LocalStore {
   async remove(c, id) {
     this._write(c, this._read(c).filter((x) => x.id !== id));
   }
-  maxFileBytes() { return 2 * 1024 * 1024; }
+  maxFileBytes() { return MAX_FILE_BYTES; }
+
+  // File contents live in IndexedDB (large quota); only metadata goes in localStorage.
+  _idb() {
+    return (this._db ||= new Promise((res, rej) => {
+      const req = indexedDB.open('tasknest-files', 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('files');
+      req.onsuccess = () => res(req.result);
+      req.onerror = () => rej(req.error);
+    }));
+  }
+  async _tx(mode, fn) {
+    const db = await this._idb();
+    return new Promise((res, rej) => {
+      const tx = db.transaction('files', mode);
+      const req = fn(tx.objectStore('files'));
+      tx.oncomplete = () => res(req?.result);
+      tx.onerror = tx.onabort = () => rej(tx.error || new Error('Could not save the file on this device (storage full?).'));
+    });
+  }
+  async saveFile(file, meta, onProgress) {
+    const id = newId();
+    await this._tx('readwrite', (st) => st.put(file, id));
+    onProgress?.(1);
+    const now = Date.now();
+    const item = { ...meta, id, storage: 'idb', createdAt: now, updatedAt: now };
+    try {
+      this._write('docs', [...this._read('docs'), item]);
+    } catch (err) {
+      await this._tx('readwrite', (st) => st.delete(id));
+      throw err;
+    }
+    return id;
+  }
+  async readFile(doc) {
+    const blob = await this._tx('readonly', (st) => st.get(doc.id));
+    if (!blob) throw new Error('This file is not stored on this device.');
+    return blob;
+  }
+  async deleteFile(doc) {
+    if (doc.storage === 'idb') await this._tx('readwrite', (st) => st.delete(doc.id)).catch(() => {});
+    await this.remove('docs', doc.id);
+  }
 }
 
 /* ───────────────────────────── Cloud mode ───────────────────────────── */
@@ -239,7 +283,45 @@ class FirebaseStore {
   async remove(c, id) {
     this._bg(this.F.deleteDoc(this.F.doc(this._col(c), id)));
   }
-  // Files are stored inside Firestore documents (1 MB limit incl. base64 overhead),
-  // so no paid Firebase Storage plan is needed.
-  maxFileBytes() { return 700 * 1024; }
+  maxFileBytes() { return MAX_FILE_BYTES; }
+
+  // Files are split into ~750 KB chunks stored as Firestore documents in the
+  // workspace's `fileChunks` collection, so the free Spark plan is enough
+  // (no paid Firebase Storage bucket needed).
+  async saveFile(file, meta, onProgress) {
+    if (!navigator.onLine) throw new Error('You are offline. Connect to the internet to upload files.');
+    const { F } = this;
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const ref = F.doc(this._col('docs'));
+    const chunks = Math.max(1, Math.ceil(bytes.length / CHUNK_BYTES));
+    try {
+      for (let i = 0; i < chunks; i++) {
+        const part = bytes.subarray(i * CHUNK_BYTES, (i + 1) * CHUNK_BYTES);
+        await F.setDoc(F.doc(this._col('fileChunks'), `${ref.id}_${i}`), { docId: ref.id, i, bytes: F.Bytes.fromUint8Array(part) });
+        onProgress?.((i + 1) / chunks);
+      }
+    } catch (err) {
+      for (let i = 0; i < chunks; i++) F.deleteDoc(F.doc(this._col('fileChunks'), `${ref.id}_${i}`)).catch(() => {});
+      throw err;
+    }
+    const now = Date.now();
+    await F.setDoc(ref, { ...meta, storage: 'chunks', chunks, createdAt: now, updatedAt: now });
+    return ref.id;
+  }
+  async readFile(doc, onProgress) {
+    const { F } = this;
+    const parts = [];
+    for (let i = 0; i < doc.chunks; i++) {
+      const snap = await F.getDoc(F.doc(this._col('fileChunks'), `${doc.id}_${i}`));
+      if (!snap.exists()) throw new Error('Part of this file is missing. Try uploading it again.');
+      parts.push(snap.data().bytes.toUint8Array());
+      onProgress?.((i + 1) / doc.chunks);
+    }
+    return new Blob(parts, { type: doc.mime || 'application/octet-stream' });
+  }
+  async deleteFile(doc) {
+    const { F } = this;
+    for (let i = 0; i < (doc.chunks || 0); i++) this._bg(F.deleteDoc(F.doc(this._col('fileChunks'), `${doc.id}_${i}`)));
+    await this.remove('docs', doc.id);
+  }
 }

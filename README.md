@@ -77,9 +77,14 @@ Firebase's free Spark plan covers small teams comfortably (50k reads and 20k wri
 - The 📅 Google Calendar and ⬇ .ics buttons put the deadline in the person's phone calendar, so they get an alert even when TaskNest is closed.
 - Each time you open the app it also shows how many of your tasks are due today and how many are overdue.
 
-## File size note
+## File size limit
 
-Files are stored in the database, so no paid storage plan is needed. The limit is **700 KB per file** in cloud mode (2 MB in local mode). For larger files, upload them to Google Drive/OneDrive and save the share link in **Documents → Add link**.
+You can upload files up to **10 MB each**.
+
+- **Cloud mode:** each file is split into pieces of about 750 KB and stored in Firestore, so the free Spark plan is enough and no paid Firebase Storage is needed. The free plan includes 1 GB of storage in total, which is roughly 100 files of 10 MB.
+- **Local mode:** files are kept in the browser's file database (IndexedDB) on that device.
+
+For files over 10 MB, upload them to Google Drive/OneDrive and save the share link in **Documents → Add link**. The **Export data** backup includes file names and details but not the contents of uploaded files.
 
 ## Run locally
 

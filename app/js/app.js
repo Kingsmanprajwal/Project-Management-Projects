@@ -726,7 +726,7 @@ function viewDocs() {
     <input type="file" id="file-input" multiple hidden />
   </div>
   <div class="pills">${folders.map((f) => `<button class="pill ${f === S.docFolder ? 'on' : ''}" data-action="doc-folder" data-folder="${esc(f)}">${esc(f)}</button>`).join('')}</div>
-  <div class="drop-zone" id="drop-zone">Drag & drop files here · max ${fmtSize(store.maxFileBytes())} per file${store.mode === 'cloud' ? ' · for bigger files add a Google Drive / OneDrive link' : ''}</div>
+  <div class="drop-zone" id="drop-zone">Drag & drop files here · max ${fmtSize(store.maxFileBytes())} per file · for bigger files add a Google Drive / OneDrive link</div>
   <div class="doc-grid">${list.length ? list.map((d) => {
     const [ic, kind] = fileKind(d);
     return `<div class="doc-card">
@@ -755,12 +755,20 @@ async function uploadFiles(files) {
   const max = store.maxFileBytes();
   for (const f of files) {
     if (f.size > max) { toast(`${f.name} is larger than ${fmtSize(max)}. Upload it to Google Drive and add it as a link instead.`, 'error'); continue; }
-    const data = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f); });
+    const progress = f.size > 1024 * 1024 ? progressToast(`Uploading ${f.name}`) : null;
     try {
-      await store.add('docs', { kind: 'file', name: f.name, mime: f.type, size: f.size, data, folder: S.docFolder !== 'All' ? S.docFolder : 'General', description: '', uploadedByName: S.user.name });
+      const meta = { kind: 'file', name: f.name, mime: f.type, size: f.size, folder: S.docFolder !== 'All' ? S.docFolder : 'General', description: '', uploadedByName: S.user.name };
+      await store.saveFile(f, meta, progress?.set);
       toast(`Uploaded ${f.name}`, 'ok');
-    } catch (err) { fail(err); }
+    } catch (err) { fail(err); } finally { progress?.done(); }
   }
+}
+function progressToast(label) {
+  const el = document.createElement('div');
+  el.className = 'toast info';
+  el.textContent = `${label}… 0%`;
+  $('#toasts').append(el);
+  return { set: (p) => { el.textContent = `${label}… ${Math.round(p * 100)}%`; }, done: () => el.remove() };
 }
 function dataUrlToBlob(url) {
   const [head, b64] = url.split(',');
@@ -769,14 +777,20 @@ function dataUrlToBlob(url) {
   for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
   return new Blob([arr], { type: mime });
 }
-function openDoc(d, forceDownload = false) {
+async function openDoc(d, forceDownload = false) {
   if (d.kind === 'link') { if (/^https?:/i.test(d.url)) window.open(d.url, '_blank', 'noopener'); return; }
-  const blob = dataUrlToBlob(d.data);
-  const previewable = /^(image\/|application\/pdf|text\/plain)/.test(blob.type);
-  if (forceDownload || !previewable) return download(d.name, blob);
+  const previewable = /^(image\/|application\/pdf|text\/plain)/.test(d.mime || '');
+  // Open the tab synchronously (inside the click) so pop-up blockers allow it, then fill it once loaded.
+  const win = !forceDownload && previewable ? window.open('', '_blank') : null;
+  let blob;
+  const progress = (d.size || 0) > 1024 * 1024 ? progressToast(`Opening ${d.name}`) : null;
+  try {
+    // Older uploads stored the file inline as a data URL.
+    blob = d.data ? dataUrlToBlob(d.data) : await store.readFile(d, progress?.set);
+  } catch (err) { win?.close(); return fail(err); } finally { progress?.done(); }
+  if (!win) return download(d.name, blob);
   const url = URL.createObjectURL(blob);
-  const w = window.open(url, '_blank');
-  if (!w) download(d.name, blob);
+  win.location.href = url;
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
@@ -1038,7 +1052,7 @@ const actions = {
   },
   'open-doc': (el) => openDoc(S.docs.find((x) => x.id === el.dataset.id)),
   'dl-doc': (el) => openDoc(S.docs.find((x) => x.id === el.dataset.id), true),
-  'del-doc': async (el) => { const d = S.docs.find((x) => x.id === el.dataset.id); if (await confirmDialog(`Delete "${d.name}"?`)) store.remove('docs', d.id).catch(fail); },
+  'del-doc': async (el) => { const d = S.docs.find((x) => x.id === el.dataset.id); if (await confirmDialog(`Delete "${d.name}"?`)) store.deleteFile(d).catch(fail); },
   'doc-folder': (el) => { S.docFolder = el.dataset.folder; renderView(true); },
   'add-person': openPersonModal,
   'del-person': async (el) => { if (await confirmDialog('Remove this contact?', 'Remove')) store.remove('people', el.dataset.id).catch(fail); },
@@ -1123,8 +1137,16 @@ document.addEventListener('change', async (e) => {
     try {
       const data = JSON.parse(await file.text());
       if (!(await confirmDialog(`Import ${data.notes?.length || 0} notes, ${data.docs?.length || 0} documents and ${data.tasks?.length || 0} tasks?`, 'Import'))) return;
-      for (const c of COLLECTIONS) for (const item of data[c] || []) { const { id, createdAt, updatedAt, ...rest } = item; await store.add(c, rest); }
-      toast('Import complete', 'ok');
+      let skipped = 0;
+      for (const c of COLLECTIONS) {
+        for (const item of data[c] || []) {
+          const { id, createdAt, updatedAt, ...rest } = item;
+          // Backups hold file details only, not the contents of uploaded files.
+          if (c === 'docs' && rest.kind === 'file' && !rest.data) { skipped++; continue; }
+          await store.add(c, rest);
+        }
+      }
+      toast(skipped ? `Import complete. ${skipped} uploaded file(s) were skipped; upload them again.` : 'Import complete', 'ok');
     } catch (err) { fail(err); }
     e.target.value = '';
   }
