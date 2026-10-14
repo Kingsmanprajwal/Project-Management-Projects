@@ -8,7 +8,15 @@
 // create a free Firebase project and paste its web config object here.
 // Step-by-step instructions are in README.md → "Enable multi-user sync".
 // ─────────────────────────────────────────────────────────────────────────────
-export const firebaseConfig = null;
+export const firebaseConfig = {
+  apiKey: "AIzaSyD32rmexvBDvXC92SRqdymq6-MPzecDhdE",
+  authDomain: "tasknest-166e7.firebaseapp.com",
+  projectId: "tasknest-166e7",
+  storageBucket: "tasknest-166e7.firebasestorage.app",
+  messagingSenderId: "232947974647",
+  appId: "1:232947974647:web:bd6c4db752a972bd47aef2",
+  measurementId: "G-5TTTRDPR4W"
+};
 
 // Example:
 // export const firebaseConfig = {
