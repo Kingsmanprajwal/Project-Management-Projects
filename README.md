@@ -66,7 +66,15 @@ Out of the box the app runs in **Local mode**: data is saved only on the device 
 
 The Firebase web config is meant to be public. Your data is protected by the Firestore rules: only members of a workspace can read or change its notes, documents and tasks.
 
-**Team flow:** the first person signs up and creates a team workspace. In **Settings** they copy or share the **invite link**. Teammates open the link, create an account, and they're in. Tasks can then be assigned to anyone on the team, and reminders show on the assignee's own devices.
+**Team flow:**
+1. The first person signs up and creates a team workspace.
+2. In **Settings → Team access** they add their teammates' email addresses.
+3. Each teammate opens the app and taps **Create account** (or **Continue with Google**) using that email. Email/password users click the confirmation link Firebase emails them, then tap **I've confirmed my email**. They join the team automatically, with no invite link or code needed.
+4. People whose email isn't on the list can't see the team.
+
+The invite link in Settings still works as an alternative. Tasks can be assigned to anyone on the team, and reminders show on the assignee's own devices.
+
+> **After updating the app, re-publish `firestore.rules`** (Firestore → Rules → paste → Publish). Team access needs the new `allow list` rule.
 
 Firebase's free Spark plan covers small teams comfortably (50k reads and 20k writes per day, 1 GB storage).
 

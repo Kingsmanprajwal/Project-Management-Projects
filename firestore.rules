@@ -17,6 +17,10 @@ service cloud.firestore {
       // The workspace id is the (unguessable) invite code, so any signed-in
       // user who has the code may look it up in order to join.
       allow get: if signedIn();
+      // Team access: a user whose verified email is on the team's list can find the team.
+      allow list: if signedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email in resource.data.allowedEmails;
       allow create: if signedIn()
         && request.resource.data.ownerId == request.auth.uid
         && request.resource.data.memberIds == [request.auth.uid];

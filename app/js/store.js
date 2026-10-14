@@ -79,6 +79,7 @@ class LocalStore {
   async joinWorkspace() { throw new Error('Joining a team needs cloud sync to be enabled.'); }
   async leaveWorkspace() {}
   async renameWorkspace() {}
+  async findInvitedWorkspace() { return null; }
 
   subscribe(c, cb) {
     (this.listeners[c] ||= []).push(cb);
@@ -182,7 +183,10 @@ class FirebaseStore {
       }
       unsubUser = F.onSnapshot(ref, (s) => {
         const d = s.data() || {};
-        this.profile = { uid: user.uid, email: user.email, name: d.name || user.email, workspaceId: d.workspaceId || null };
+        this.profile = {
+          uid: user.uid, email: user.email, name: d.name || user.email, workspaceId: d.workspaceId || null,
+          emailVerified: this.auth.currentUser?.emailVerified ?? user.emailVerified,
+        };
         cb(this.profile);
       });
     });
@@ -192,6 +196,19 @@ class FirebaseStore {
     this._pendingName = name;
     const cred = await this.A.createUserWithEmailAndPassword(this.auth, email, password);
     await this.A.updateProfile(cred.user, { displayName: name });
+    // Verified email is required to auto-join a team by email (see firestore.rules).
+    await this.A.sendEmailVerification(cred.user).catch(() => {});
+  }
+  async resendVerification() {
+    await this.A.sendEmailVerification(this.auth.currentUser);
+  }
+  // Re-check verification after the user clicked the link in their inbox.
+  async refreshVerification() {
+    const u = this.auth.currentUser;
+    await u.reload();
+    await u.getIdToken(true);
+    if (this.profile) this.profile.emailVerified = u.emailVerified;
+    return u.emailVerified;
   }
   async signIn({ email, password }) {
     await this.A.signInWithEmailAndPassword(this.auth, email, password);
@@ -229,6 +246,7 @@ class FirebaseStore {
       ownerId: profile.uid,
       memberIds: [profile.uid],
       members: { [profile.uid]: { name: profile.name, email: profile.email } },
+      allowedEmails: [profile.email.toLowerCase()],
       createdAt: Date.now(),
     });
     await F.updateDoc(F.doc(this.db, 'users', profile.uid), { workspaceId: ref.id });
@@ -246,6 +264,23 @@ class FirebaseStore {
       });
     }
     await F.updateDoc(F.doc(this.db, 'users', profile.uid), { workspaceId: ref.id });
+  }
+  // Team access: people whose (verified) email is on a team's list join it automatically.
+  async findInvitedWorkspace() {
+    const { F } = this;
+    const u = this.auth.currentUser;
+    if (!u?.emailVerified || !u.email) return null;
+    const q = F.query(F.collection(this.db, 'workspaces'), F.where('allowedEmails', 'array-contains', u.email.toLowerCase()), F.limit(1));
+    const snap = await F.getDocs(q);
+    return snap.empty ? null : snap.docs[0].id;
+  }
+  async allowEmail(email) {
+    const { F, profile } = this;
+    await F.updateDoc(F.doc(this.db, 'workspaces', profile.workspaceId), { allowedEmails: F.arrayUnion(email.trim().toLowerCase()) });
+  }
+  async disallowEmail(email) {
+    const { F, profile } = this;
+    await F.updateDoc(F.doc(this.db, 'workspaces', profile.workspaceId), { allowedEmails: F.arrayRemove(email) });
   }
   async leaveWorkspace() {
     const { F, profile } = this;
