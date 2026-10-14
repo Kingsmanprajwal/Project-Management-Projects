@@ -1,5 +1,5 @@
 // Offline support: cache the app shell; always try the network first so updates show up quickly.
-const CACHE = 'tasknest-v1';
+const CACHE = 'tasknest-v3';
 const SHELL = [
   './', './index.html', './manifest.webmanifest', './css/styles.css',
   './js/app.js', './js/store.js', './js/firebase-config.js',

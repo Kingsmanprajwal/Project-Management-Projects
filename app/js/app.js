@@ -383,27 +383,61 @@ function renderAuth(mode = 'signin') {
   });
 }
 
+let skipAutoJoin = false;
+async function autoJoinOrSetup() {
+  // People whose email is on a team's "Team access" list join it without any invite link.
+  if (store.mode === 'cloud' && !skipAutoJoin && S.user.emailVerified) {
+    $('#app').innerHTML = '<div class="splash"><img src="icons/icon.svg" alt="" width="64" height="64" /><p>Finding your team…</p></div>';
+    try {
+      const id = await store.findInvitedWorkspace();
+      if (id) { await store.joinWorkspace(id); toast('You joined your team 🎉', 'ok'); return; }
+    } catch (err) { console.warn('Auto-join failed', err); }
+  }
+  renderWorkspaceSetup();
+}
+
 function renderWorkspaceSetup() {
   const code = new URLSearchParams(location.search).get('join') || '';
+  const needsVerify = store.mode === 'cloud' && !S.user.emailVerified;
   $('#app').innerHTML = `
   <div class="auth-wrap"><div class="auth-card">
     <div class="brand big"><img src="icons/icon.svg" alt="" /> TaskNest</div>
-    <p>Hi <b>${esc(S.user.name)}</b>! Create a team workspace or join one with an invite code.</p>
-    <form id="join-form" class="card">
-      <h3>Join a team</h3>
-      <label>Invite code<input name="code" required value="${esc(code)}" placeholder="Paste the code your teammate shared" /></label>
-      <button class="btn primary block">Join team</button>
-    </form>
-    <form id="create-form" class="card">
-      <h3>Create a new team</h3>
-      <label>Team name<input name="name" required placeholder="e.g. Marketing team" /></label>
-      <button class="btn block">Create workspace</button>
-    </form>
+    <p>Hi <b>${esc(S.user.name)}</b>!</p>
+    ${needsVerify ? `<div class="card verify-card">
+      <h3>📧 Confirm your email</h3>
+      <p>We sent a link to <b>${esc(S.user.email)}</b>. Open it (check Spam too), then come back and tap the button below. If your teammate added your email in their Team access list, you'll join their team automatically.</p>
+      <button class="btn primary block" id="verified-btn">I've confirmed my email</button>
+      <button class="link-btn" id="resend-btn">Resend email</button>
+    </div>` : `<p class="muted">Your email isn't on any team's access list yet. Ask your teammate to add <b>${esc(S.user.email || '')}</b> in <b>Settings → Team access</b>, then tap <a href="#" id="retry-join">Check again</a>. Or set up a team below.</p>`}
+    <details class="card" ${code ? 'open' : ''}>
+      <summary><b>Join with an invite code</b></summary>
+      <form id="join-form">
+        <label>Invite code<input name="code" required value="${esc(code)}" placeholder="Paste the code your teammate shared" /></label>
+        <button class="btn primary block">Join team</button>
+      </form>
+    </details>
+    <details class="card">
+      <summary><b>Create a new team</b> <span class="muted small">(only if you're starting the team)</span></summary>
+      <form id="create-form">
+        <label>Team name<input name="name" required placeholder="e.g. Marketing team" /></label>
+        <button class="btn block">Create workspace</button>
+      </form>
+    </details>
     <button class="link-btn" id="signout">Sign out</button>
   </div></div>`;
   $('#join-form').onsubmit = (e) => { e.preventDefault(); store.joinWorkspace(e.target.code.value).then(() => history.replaceState(null, '', location.pathname + '#home')).catch(fail); };
   $('#create-form').onsubmit = (e) => { e.preventDefault(); store.createWorkspace(e.target.name.value.trim()).catch(fail); };
   $('#signout').onclick = () => store.signOut();
+  $('#retry-join')?.addEventListener('click', (e) => { e.preventDefault(); skipAutoJoin = false; autoJoinOrSetup(); });
+  $('#resend-btn')?.addEventListener('click', () => store.resendVerification().then(() => toast('Email sent again', 'ok')).catch(fail));
+  $('#verified-btn')?.addEventListener('click', async () => {
+    try {
+      if (!(await store.refreshVerification())) return toast('Not confirmed yet. Open the link in the email first.', 'error');
+      S.user.emailVerified = true;
+      skipAutoJoin = false;
+      autoJoinOrSetup();
+    } catch (err) { fail(err); }
+  });
 }
 
 /* ═════════════════════════════ Shell & routing ═════════════════════════════ */
@@ -726,7 +760,7 @@ function viewDocs() {
     <input type="file" id="file-input" multiple hidden />
   </div>
   <div class="pills">${folders.map((f) => `<button class="pill ${f === S.docFolder ? 'on' : ''}" data-action="doc-folder" data-folder="${esc(f)}">${esc(f)}</button>`).join('')}</div>
-  <div class="drop-zone" id="drop-zone">Drag & drop files here · max ${fmtSize(store.maxFileBytes())} per file${store.mode === 'cloud' ? ' · for bigger files add a Google Drive / OneDrive link' : ''}</div>
+  <div class="drop-zone" id="drop-zone">Drag & drop files here · max ${fmtSize(store.maxFileBytes())} per file · for bigger files add a Google Drive / OneDrive link</div>
   <div class="doc-grid">${list.length ? list.map((d) => {
     const [ic, kind] = fileKind(d);
     return `<div class="doc-card">
@@ -755,12 +789,20 @@ async function uploadFiles(files) {
   const max = store.maxFileBytes();
   for (const f of files) {
     if (f.size > max) { toast(`${f.name} is larger than ${fmtSize(max)}. Upload it to Google Drive and add it as a link instead.`, 'error'); continue; }
-    const data = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f); });
+    const progress = f.size > 1024 * 1024 ? progressToast(`Uploading ${f.name}`) : null;
     try {
-      await store.add('docs', { kind: 'file', name: f.name, mime: f.type, size: f.size, data, folder: S.docFolder !== 'All' ? S.docFolder : 'General', description: '', uploadedByName: S.user.name });
+      const meta = { kind: 'file', name: f.name, mime: f.type, size: f.size, folder: S.docFolder !== 'All' ? S.docFolder : 'General', description: '', uploadedByName: S.user.name };
+      await store.saveFile(f, meta, progress?.set);
       toast(`Uploaded ${f.name}`, 'ok');
-    } catch (err) { fail(err); }
+    } catch (err) { fail(err); } finally { progress?.done(); }
   }
+}
+function progressToast(label) {
+  const el = document.createElement('div');
+  el.className = 'toast info';
+  el.textContent = `${label}… 0%`;
+  $('#toasts').append(el);
+  return { set: (p) => { el.textContent = `${label}… ${Math.round(p * 100)}%`; }, done: () => el.remove() };
 }
 function dataUrlToBlob(url) {
   const [head, b64] = url.split(',');
@@ -769,14 +811,20 @@ function dataUrlToBlob(url) {
   for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
   return new Blob([arr], { type: mime });
 }
-function openDoc(d, forceDownload = false) {
+async function openDoc(d, forceDownload = false) {
   if (d.kind === 'link') { if (/^https?:/i.test(d.url)) window.open(d.url, '_blank', 'noopener'); return; }
-  const blob = dataUrlToBlob(d.data);
-  const previewable = /^(image\/|application\/pdf|text\/plain)/.test(blob.type);
-  if (forceDownload || !previewable) return download(d.name, blob);
+  const previewable = /^(image\/|application\/pdf|text\/plain)/.test(d.mime || '');
+  // Open the tab synchronously (inside the click) so pop-up blockers allow it, then fill it once loaded.
+  const win = !forceDownload && previewable ? window.open('', '_blank') : null;
+  let blob;
+  const progress = (d.size || 0) > 1024 * 1024 ? progressToast(`Opening ${d.name}`) : null;
+  try {
+    // Older uploads stored the file inline as a data URL.
+    blob = d.data ? dataUrlToBlob(d.data) : await store.readFile(d, progress?.set);
+  } catch (err) { win?.close(); return fail(err); } finally { progress?.done(); }
+  if (!win) return download(d.name, blob);
   const url = URL.createObjectURL(blob);
-  const w = window.open(url, '_blank');
-  if (!w) download(d.name, blob);
+  win.location.href = url;
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
@@ -965,10 +1013,11 @@ function viewSettings() {
     <form data-form="profile" class="row wrap"><input id="set-name" name="name" value="${esc(S.user.name)}" required /><button class="btn">Save name</button></form>
     ${S.user.email ? `<p class="muted small">Signed in as ${esc(S.user.email)}</p>` : ''}
   </section>
+  ${cloud ? teamAccessCard() : ''}
   ${cloud ? `<section class="card narrow">
     <h3>Team workspace</h3>
     <form data-form="ws-name" class="row wrap"><input id="set-ws" name="name" value="${esc(S.ws?.name || '')}" required /><button class="btn">Rename</button></form>
-    <p>Invite teammates — they open this link, create an account and join automatically:</p>
+    <p>Or invite someone with a link (they tap <b>Join team</b> after signing up):</p>
     <div class="copy-box"><code>${esc(inviteLink)}</code></div>
     <div class="row wrap"><button class="btn" data-action="copy" data-text="${esc(inviteLink)}">${icon('copy')} Copy invite link</button>
     <button class="btn" data-action="share-invite" data-text="${esc(inviteLink)}">${icon('share')} Share</button>
@@ -993,6 +1042,23 @@ function viewSettings() {
     <label class="btn">${icon('upload')} Import<input type="file" id="import-file" accept="application/json" hidden /></label></div>
   </section>
   <button class="btn danger block-sm" data-action="signout">Sign out</button>`;
+}
+
+function teamAccessCard() {
+  const allowed = [...(S.ws?.allowedEmails || [])].sort();
+  const joined = new Set(members().map((m) => (m.email || '').toLowerCase()));
+  return `<section class="card narrow">
+    <h3>Team access</h3>
+    <p class="muted">Add your teammates' email addresses. When they open the app and sign up with that email, they join this team automatically, with no invite link needed. Nobody else can get in.</p>
+    <form data-form="allow-email" class="row wrap"><input id="allow-email" name="email" type="email" required placeholder="friend@gmail.com" /><button class="btn primary">${icon('plus')} Add</button></form>
+    <div class="email-list">${allowed.length ? allowed.map((e) => `<div class="person">
+      <span class="avatar sm">${esc(e[0].toUpperCase())}</span>
+      <div><b>${esc(e)}</b><small class="muted">${joined.has(e) ? '✅ Joined' : 'Waiting to sign up'}</small></div>
+      <span class="spacer"></span>
+      ${e !== (S.user.email || '').toLowerCase() ? `<button class="icon-btn" data-action="disallow-email" data-email="${esc(e)}" title="Remove">${icon('trash')}</button>` : ''}
+    </div>`).join('') : '<p class="muted small">No emails added yet.</p>'}</div>
+    <p class="muted small">Tell them: open <b>${esc(location.origin + location.pathname)}</b>, tap <b>Create account</b> (or <b>Continue with Google</b>) using this email, and confirm the email if asked.</p>
+  </section>`;
 }
 
 /* ═════════════════════════════ Event handling ═════════════════════════════ */
@@ -1038,7 +1104,7 @@ const actions = {
   },
   'open-doc': (el) => openDoc(S.docs.find((x) => x.id === el.dataset.id)),
   'dl-doc': (el) => openDoc(S.docs.find((x) => x.id === el.dataset.id), true),
-  'del-doc': async (el) => { const d = S.docs.find((x) => x.id === el.dataset.id); if (await confirmDialog(`Delete "${d.name}"?`)) store.remove('docs', d.id).catch(fail); },
+  'del-doc': async (el) => { const d = S.docs.find((x) => x.id === el.dataset.id); if (await confirmDialog(`Delete "${d.name}"?`)) store.deleteFile(d).catch(fail); },
   'doc-folder': (el) => { S.docFolder = el.dataset.folder; renderView(true); },
   'add-person': openPersonModal,
   'del-person': async (el) => { if (await confirmDialog('Remove this contact?', 'Remove')) store.remove('people', el.dataset.id).catch(fail); },
@@ -1065,7 +1131,10 @@ const actions = {
     const data = { title: 'Join my TaskNest team', text: `Join "${S.ws?.name}" on TaskNest:`, url: el.dataset.text };
     if (navigator.share) navigator.share(data).catch(() => {}); else actions.copy(el);
   },
-  'leave-ws': async () => { if (await confirmDialog('Switch to another team? You can rejoin with the invite code.', 'Switch')) store.leaveWorkspace().catch(fail); },
+  'leave-ws': async () => { if (await confirmDialog('Switch to another team? You can rejoin with the invite code.', 'Switch')) { skipAutoJoin = true; store.leaveWorkspace().catch(fail); } },
+  'disallow-email': async (el) => {
+    if (await confirmDialog(`Remove ${el.dataset.email} from Team access? People who already joined stay in the team.`, 'Remove')) store.disallowEmail(el.dataset.email).catch(fail);
+  },
   signout: async () => { if (await confirmDialog('Sign out?', 'Sign out')) store.signOut().catch(fail); },
   install: async () => {
     if (!installPrompt) return toast('Use your browser menu → "Install app" / "Add to Home Screen"', 'info');
@@ -1105,6 +1174,10 @@ document.addEventListener('submit', (e) => {
     form.reset();
   } else if (type === 'profile') {
     store.updateProfile({ name: form.name.value.trim() }).then(() => toast('Saved', 'ok')).catch(fail);
+  } else if (type === 'allow-email') {
+    const email = form.email.value.trim().toLowerCase();
+    store.allowEmail(email).then(() => toast(`${email} can now join the team`, 'ok')).catch(fail);
+    form.reset();
   } else if (type === 'ws-name') {
     store.renameWorkspace(form.name.value.trim()).then(() => toast('Workspace renamed', 'ok')).catch(fail);
   }
@@ -1123,8 +1196,16 @@ document.addEventListener('change', async (e) => {
     try {
       const data = JSON.parse(await file.text());
       if (!(await confirmDialog(`Import ${data.notes?.length || 0} notes, ${data.docs?.length || 0} documents and ${data.tasks?.length || 0} tasks?`, 'Import'))) return;
-      for (const c of COLLECTIONS) for (const item of data[c] || []) { const { id, createdAt, updatedAt, ...rest } = item; await store.add(c, rest); }
-      toast('Import complete', 'ok');
+      let skipped = 0;
+      for (const c of COLLECTIONS) {
+        for (const item of data[c] || []) {
+          const { id, createdAt, updatedAt, ...rest } = item;
+          // Backups hold file details only, not the contents of uploaded files.
+          if (c === 'docs' && rest.kind === 'file' && !rest.data) { skipped++; continue; }
+          await store.add(c, rest);
+        }
+      }
+      toast(skipped ? `Import complete. ${skipped} uploaded file(s) were skipped; upload them again.` : 'Import complete', 'ok');
     } catch (err) { fail(err); }
     e.target.value = '';
   }
@@ -1194,7 +1275,7 @@ async function boot() {
     stopData();
     lastRoute = '';
     if (!profile) return renderAuth();
-    if (!profile.workspaceId) return renderWorkspaceSetup();
+    if (!profile.workspaceId) return autoJoinOrSetup();
     if (new URLSearchParams(location.search).has('join')) history.replaceState(null, '', location.pathname + location.hash);
     startData();
     renderShell();
