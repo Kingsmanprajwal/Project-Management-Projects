@@ -8,6 +8,8 @@ const FB_URL = (m) => `https://www.gstatic.com/firebasejs/${FB_VERSION}/firebase
 const newId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 
 export const COLLECTIONS = ['notes', 'docs', 'tasks', 'people'];
+// Personal (private, per-user) collections used by Saved Content.
+export const MY_COLLECTIONS = ['savedItems', 'collections'];
 export const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB per uploaded file
 const CHUNK_BYTES = 750 * 1024; // stays under Firestore's 1 MiB per-document limit
 
@@ -140,6 +142,26 @@ class LocalStore {
   async deleteFile(doc) {
     if (doc.storage === 'idb') await this._tx('readwrite', (st) => st.delete(doc.id)).catch(() => {});
     await this.remove('docs', doc.id);
+  }
+
+  // ── Personal data (Saved Content). Local mode has a single user per device. ──
+  subscribeMine(c, cb) { return this.subscribe('me:' + c, cb); }
+  async addMine(c, data) { return this.add('me:' + c, { ...data, userId: this._profile()?.uid || '' }); }
+  async updateMine(c, id, data) { return this.update('me:' + c, id, data); }
+  async removeMine(c, id) { return this.remove('me:' + c, id); }
+  async putMyFile(file, onProgress) {
+    const key = 'me-' + newId();
+    await this._tx('readwrite', (st) => st.put(file, key));
+    onProgress?.(1);
+    return { fileStorageKey: key, fileChunks: 0 };
+  }
+  async getMyFile(item) {
+    const blob = await this._tx('readonly', (st) => st.get(item.fileStorageKey));
+    if (!blob) throw new Error('This file is not stored on this device.');
+    return blob;
+  }
+  async deleteMyFile(item) {
+    if (item.fileStorageKey) await this._tx('readwrite', (st) => st.delete(item.fileStorageKey)).catch(() => {});
   }
 }
 
@@ -320,43 +342,88 @@ class FirebaseStore {
   }
   maxFileBytes() { return MAX_FILE_BYTES; }
 
-  // Files are split into ~750 KB chunks stored as Firestore documents in the
-  // workspace's `fileChunks` collection, so the free Spark plan is enough
-  // (no paid Firebase Storage bucket needed).
-  async saveFile(file, meta, onProgress) {
+  // Files are split into ~750 KB chunks stored as Firestore documents, so the
+  // free Spark plan is enough (no paid Firebase Storage bucket needed).
+  async _writeChunks(col, key, file, onProgress) {
     if (!navigator.onLine) throw new Error('You are offline. Connect to the internet to upload files.');
     const { F } = this;
     const bytes = new Uint8Array(await file.arrayBuffer());
-    const ref = F.doc(this._col('docs'));
     const chunks = Math.max(1, Math.ceil(bytes.length / CHUNK_BYTES));
     try {
       for (let i = 0; i < chunks; i++) {
         const part = bytes.subarray(i * CHUNK_BYTES, (i + 1) * CHUNK_BYTES);
-        await F.setDoc(F.doc(this._col('fileChunks'), `${ref.id}_${i}`), { docId: ref.id, i, bytes: F.Bytes.fromUint8Array(part) });
+        await F.setDoc(F.doc(col, `${key}_${i}`), { docId: key, i, bytes: F.Bytes.fromUint8Array(part) });
         onProgress?.((i + 1) / chunks);
       }
     } catch (err) {
-      for (let i = 0; i < chunks; i++) F.deleteDoc(F.doc(this._col('fileChunks'), `${ref.id}_${i}`)).catch(() => {});
+      this._deleteChunks(col, key, chunks);
       throw err;
     }
+    return chunks;
+  }
+  async _readChunks(col, key, chunks, mime, onProgress) {
+    const { F } = this;
+    const parts = [];
+    for (let i = 0; i < chunks; i++) {
+      const snap = await F.getDoc(F.doc(col, `${key}_${i}`));
+      if (!snap.exists()) throw new Error('Part of this file is missing. Try uploading it again.');
+      parts.push(snap.data().bytes.toUint8Array());
+      onProgress?.((i + 1) / chunks);
+    }
+    return new Blob(parts, { type: mime || 'application/octet-stream' });
+  }
+  _deleteChunks(col, key, chunks) {
+    for (let i = 0; i < (chunks || 0); i++) this._bg(this.F.deleteDoc(this.F.doc(col, `${key}_${i}`)));
+  }
+
+  // Legacy team Documents (kept readable so people can import them into Saved Content).
+  async saveFile(file, meta, onProgress) {
+    const ref = this.F.doc(this._col('docs'));
+    const chunks = await this._writeChunks(this._col('fileChunks'), ref.id, file, onProgress);
     const now = Date.now();
-    await F.setDoc(ref, { ...meta, storage: 'chunks', chunks, createdAt: now, updatedAt: now });
+    await this.F.setDoc(ref, { ...meta, storage: 'chunks', chunks, createdAt: now, updatedAt: now });
     return ref.id;
   }
   async readFile(doc, onProgress) {
-    const { F } = this;
-    const parts = [];
-    for (let i = 0; i < doc.chunks; i++) {
-      const snap = await F.getDoc(F.doc(this._col('fileChunks'), `${doc.id}_${i}`));
-      if (!snap.exists()) throw new Error('Part of this file is missing. Try uploading it again.');
-      parts.push(snap.data().bytes.toUint8Array());
-      onProgress?.((i + 1) / doc.chunks);
-    }
-    return new Blob(parts, { type: doc.mime || 'application/octet-stream' });
+    return this._readChunks(this._col('fileChunks'), doc.id, doc.chunks, doc.mime, onProgress);
   }
   async deleteFile(doc) {
-    const { F } = this;
-    for (let i = 0; i < (doc.chunks || 0); i++) this._bg(F.deleteDoc(F.doc(this._col('fileChunks'), `${doc.id}_${i}`)));
+    this._deleteChunks(this._col('fileChunks'), doc.id, doc.chunks);
     await this.remove('docs', doc.id);
+  }
+
+  // ── Personal data (Saved Content): users/{uid}/…, readable only by that user. ──
+  _mine(c) {
+    return this.F.collection(this.db, 'users', this.profile.uid, c);
+  }
+  subscribeMine(c, cb, onError) {
+    return this.F.onSnapshot(
+      this._mine(c),
+      (snap) => cb(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+      (err) => onError?.(err),
+    );
+  }
+  async addMine(c, data) {
+    const now = Date.now();
+    const ref = this.F.doc(this._mine(c));
+    this._bg(this.F.setDoc(ref, { ...data, userId: this.profile.uid, createdAt: now, updatedAt: now }));
+    return ref.id;
+  }
+  async updateMine(c, id, data) {
+    this._bg(this.F.updateDoc(this.F.doc(this._mine(c), id), { ...data, updatedAt: Date.now() }));
+  }
+  async removeMine(c, id) {
+    this._bg(this.F.deleteDoc(this.F.doc(this._mine(c), id)));
+  }
+  async putMyFile(file, onProgress) {
+    const key = this.F.doc(this._mine('fileChunks')).id;
+    const fileChunks = await this._writeChunks(this._mine('fileChunks'), key, file, onProgress);
+    return { fileStorageKey: key, fileChunks };
+  }
+  async getMyFile(item, onProgress) {
+    return this._readChunks(this._mine('fileChunks'), item.fileStorageKey, item.fileChunks, item.mimeType, onProgress);
+  }
+  async deleteMyFile(item) {
+    if (item.fileStorageKey) this._deleteChunks(this._mine('fileChunks'), item.fileStorageKey, item.fileChunks);
   }
 }

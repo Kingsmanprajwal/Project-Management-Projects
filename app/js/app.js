@@ -1,4 +1,5 @@
-import { createStore, COLLECTIONS } from './store.js';
+import { createStore, COLLECTIONS, MY_COLLECTIONS } from './store.js';
+import { createSaved } from './saved.js';
 
 /* ═════════════════════════════ Helpers ═════════════════════════════ */
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -57,6 +58,7 @@ const ICONS = {
   home: '<path d="M3 11l9-8 9 8v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
   notes: '<path d="M6 3h9l5 5v13H6z"/><path d="M14 3v6h6M9 13h8M9 17h6"/>',
   docs: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  bookmark: '<path d="M6 3h12v18l-6-4-6 4z"/>',
   ideas: '<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10.5c.7.7 1 1.5 1 2.5h6c0-1 .3-1.8 1-2.5A6 6 0 0 0 12 3z"/>',
   tracker: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',
   assign: '<circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0M19 8v6M16 11h6"/>',
@@ -83,14 +85,15 @@ const icon = (n, cls = '') => `<svg class="ic ${cls}" viewBox="0 0 24 24" fill="
 
 /* ═════════════════════════════ State ═════════════════════════════ */
 const S = {
-  user: null, ws: null, notes: [], docs: [], tasks: [], people: [],
+  user: null, ws: null, notes: [], docs: [], tasks: [], people: [], savedItems: [], collections: [], savedError: '',
   sessionKey: undefined, unsubs: [],
   calMonth: (() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; })(),
   selDate: todayISO(),
   ideasView: localGet('ideasView', 'list'), ideasFilter: 'all', ideasStatus: 'open',
-  assignTab: 'me', noteSearch: '', docSearch: '', docFolder: 'All',
+  assignTab: 'me', noteSearch: '',
 };
 let store;
+let savedFeature; // Saved Content feature (js/saved.js)
 let installPrompt = null;
 
 function localGet(k, d) { try { return localStorage.getItem('tn-ui:' + k) ?? d; } catch { return d; } }
@@ -99,7 +102,7 @@ function localSet(k, v) { try { localStorage.setItem('tn-ui:' + k, v); } catch {
 const NAV = [
   ['home', 'Home', 'home', 'Home'],
   ['notes', 'Notes', 'notes', 'Notes'],
-  ['docs', 'Documents', 'docs', 'Docs'],
+  ['saved', 'Saved Content', 'bookmark', 'Saved'],
   ['ideas', 'Ideas & To-Do', 'ideas', 'To-Do'],
   ['tracker', 'Deadline Tracker', 'tracker', 'Deadlines'],
   ['assign', 'Task Assigner', 'assign', 'Assign'],
@@ -131,8 +134,10 @@ function fail(err) {
   toast(AUTH_ERRORS[err?.code] || String(err?.message || err).replace(/^Firebase:\s*/, ''), 'error');
 }
 
-function openModal(html, { onSubmit, onOpen, wide } = {}) {
+let modalOnClose = null;
+function openModal(html, { onSubmit, onOpen, onClose, wide } = {}) {
   const root = $('#modal-root');
+  modalOnClose = onClose || null;
   root.innerHTML = `<div class="modal-backdrop"><div class="modal ${wide ? 'wide' : ''}" role="dialog" aria-modal="true">${html}</div></div>`;
   const backdrop = $('.modal-backdrop', root);
   backdrop.addEventListener('mousedown', (e) => { if (e.target === backdrop) closeModal(); });
@@ -148,7 +153,12 @@ function openModal(html, { onSubmit, onOpen, wide } = {}) {
   onOpen?.(root);
   if (!root.contains(document.activeElement)) $('input:not([type=hidden]),textarea,select', root)?.focus();
 }
-function closeModal() { $('#modal-root').innerHTML = ''; }
+function closeModal() {
+  const cb = modalOnClose;
+  modalOnClose = null;
+  $('#modal-root').innerHTML = '';
+  cb?.();
+}
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
 function confirmDialog(msg, okLabel = 'Delete') {
@@ -471,20 +481,22 @@ function renderShell() {
 }
 
 function currentRoute() {
-  const [r, id] = location.hash.slice(1).split('/');
-  return { r: r || 'home', id };
+  const parts = location.hash.slice(1).split('/').map((p) => decodeURIComponent(p));
+  return { r: parts[0] || 'home', id: parts[1], parts };
 }
-const TITLES = { home: 'Home', notes: 'Notes', docs: 'Documents', ideas: 'Ideas & To-Do', tracker: 'Deadline Tracker', assign: 'Task Assigner', settings: 'Settings' };
+const TITLES = { home: 'Home', notes: 'Notes', saved: 'Saved Content', share: 'Saved Content', ideas: 'Ideas & To-Do', tracker: 'Deadline Tracker', assign: 'Task Assigner', settings: 'Settings' };
 
 let lastRoute = '';
 function renderView(soft = false) {
   if (!$('#view')) return;
-  const { r, id } = currentRoute();
-  const routeKey = r + '/' + (id || '');
+  const { r, id, parts } = currentRoute();
+  // The old Documents section now lives in Saved Content.
+  if (r === 'docs') { location.replace('#saved'); return; }
+  const routeKey = parts.join('/');
   if (routeKey !== lastRoute) soft = false;
   lastRoute = routeKey;
   $('#page-title').textContent = TITLES[r] || 'TaskNest';
-  $$('[data-route]').forEach((a) => a.classList.toggle('active', a.dataset.route === r));
+  $$('[data-route]').forEach((a) => a.classList.toggle('active', a.dataset.route === (r === 'share' ? 'saved' : r)));
   document.title = `${TITLES[r] || 'Home'} · TaskNest`;
 
   if (r === 'notes') return renderNotes(id, soft);
@@ -494,7 +506,8 @@ function renderView(soft = false) {
   const saved = soft ? $$('input[id],textarea[id],select[id]', view).map((el) => [el.id, el.value]) : [];
   const focusId = soft ? document.activeElement?.id : null;
   const scroll = view.scrollTop;
-  const fn = { home: viewHome, docs: viewDocs, ideas: viewIdeas, tracker: viewTracker, assign: viewAssign, settings: viewSettings }[r] || viewHome;
+  const savedView = () => savedFeature.view(parts);
+  const fn = { home: viewHome, saved: savedView, share: savedView, ideas: viewIdeas, tracker: viewTracker, assign: viewAssign, settings: viewSettings }[r] || viewHome;
   view.innerHTML = fn();
   if (soft) {
     saved.forEach(([i, v]) => { const el = document.getElementById(i); if (el && el.type !== 'file') el.value = v; });
@@ -733,70 +746,7 @@ async function newNote() {
   location.hash = '#notes/' + id;
 }
 
-/* ═════════════════════════════ Documents ═════════════════════════════ */
-const fileKind = (d) => {
-  if (d.kind === 'link') return ['🔗', 'Link'];
-  const t = d.mime || '';
-  if (t.startsWith('image/')) return ['🖼️', 'Image'];
-  if (t.includes('pdf')) return ['📕', 'PDF'];
-  if (/sheet|excel|csv/.test(t)) return ['📊', 'Sheet'];
-  if (/presentation|powerpoint/.test(t)) return ['📽️', 'Slides'];
-  if (/word|document|text/.test(t)) return ['📄', 'Doc'];
-  return ['📎', 'File'];
-};
-function viewDocs() {
-  const folders = ['All', ...new Set(S.docs.map((d) => d.folder || 'General'))];
-  const q = S.docSearch.toLowerCase();
-  const list = S.docs
-    .filter((d) => S.docFolder === 'All' || (d.folder || 'General') === S.docFolder)
-    .filter((d) => !q || `${d.name} ${d.folder} ${d.description}`.toLowerCase().includes(q))
-    .sort((a, b) => b.createdAt - a.createdAt);
-  return `
-  <div class="toolbar-row">
-    <div class="search">${icon('search')}<input id="doc-search" placeholder="Search documents" value="${esc(S.docSearch)}" /></div>
-    <span class="spacer"></span>
-    <button class="btn" data-action="add-link">${icon('link')} Add link</button>
-    <button class="btn primary" data-action="upload-doc">${icon('upload')} Upload</button>
-    <input type="file" id="file-input" multiple hidden />
-  </div>
-  <div class="pills">${folders.map((f) => `<button class="pill ${f === S.docFolder ? 'on' : ''}" data-action="doc-folder" data-folder="${esc(f)}">${esc(f)}</button>`).join('')}</div>
-  <div class="drop-zone" id="drop-zone">Drag & drop files here · max ${fmtSize(store.maxFileBytes())} per file · for bigger files add a Google Drive / OneDrive link</div>
-  <div class="doc-grid">${list.length ? list.map((d) => {
-    const [ic, kind] = fileKind(d);
-    return `<div class="doc-card">
-      <div class="doc-ic">${ic}</div>
-      <div class="doc-info"><b title="${esc(d.name)}">${esc(d.name)}</b>
-      <small>${kind}${d.size ? ' · ' + fmtSize(d.size) : ''} · ${esc(d.folder || 'General')}</small>
-      <small class="muted">${esc(d.uploadedByName || '')} · ${timeAgo(d.createdAt)}</small>
-      ${d.description ? `<p>${esc(d.description)}</p>` : ''}</div>
-      <div class="doc-actions">
-        <button class="btn sm" data-action="open-doc" data-id="${d.id}">Open</button>
-        ${d.kind !== 'link' ? `<button class="icon-btn" data-action="dl-doc" data-id="${d.id}" title="Download">${icon('download')}</button>` : ''}
-        <button class="icon-btn" data-action="edit-doc" data-id="${d.id}" title="Edit">${icon('edit')}</button>
-        <button class="icon-btn" data-action="del-doc" data-id="${d.id}" title="Delete">${icon('trash')}</button>
-      </div></div>`;
-  }).join('') : empty('No documents', 'Upload files or save links to keep your team documents in one place.')}</div>`;
-}
-function docForm(d = {}) {
-  const folders = [...new Set(S.docs.map((x) => x.folder || 'General'))];
-  return `
-    <label>Name<input name="name" required value="${esc(d.name || '')}" /></label>
-    ${d.kind === 'link' || d.isNewLink ? `<label>URL<input name="url" type="url" required placeholder="https://drive.google.com/…" value="${esc(d.url || '')}" /></label>` : ''}
-    <label>Folder<input name="folder" list="folders" value="${esc(d.folder || (S.docFolder !== 'All' ? S.docFolder : 'General'))}" /><datalist id="folders">${folders.map((f) => `<option value="${esc(f)}">`).join('')}</datalist></label>
-    <label>Description<textarea name="description" rows="2">${esc(d.description || '')}</textarea></label>`;
-}
-async function uploadFiles(files) {
-  const max = store.maxFileBytes();
-  for (const f of files) {
-    if (f.size > max) { toast(`${f.name} is larger than ${fmtSize(max)}. Upload it to Google Drive and add it as a link instead.`, 'error'); continue; }
-    const progress = f.size > 1024 * 1024 ? progressToast(`Uploading ${f.name}`) : null;
-    try {
-      const meta = { kind: 'file', name: f.name, mime: f.type, size: f.size, folder: S.docFolder !== 'All' ? S.docFolder : 'General', description: '', uploadedByName: S.user.name };
-      await store.saveFile(f, meta, progress?.set);
-      toast(`Uploaded ${f.name}`, 'ok');
-    } catch (err) { fail(err); } finally { progress?.done(); }
-  }
-}
+/* ═════════════════════════════ Files (shared helpers; legacy team documents) ═════════════════════════════ */
 function progressToast(label) {
   const el = document.createElement('div');
   el.className = 'toast info';
@@ -1090,22 +1040,6 @@ const actions = {
     if (await confirmDialog(`Delete note "${n?.title || 'Untitled'}"?`)) { location.hash = '#notes'; store.remove('notes', el.dataset.id).catch(fail); }
   },
   'pin-note': (el) => { const n = S.notes.find((x) => x.id === el.dataset.id); store.update('notes', n.id, { pinned: !n.pinned }).catch(fail); },
-  'upload-doc': () => $('#file-input').click(),
-  'add-link': () => openModal(`<form><div class="modal-head"><h3>Add document link</h3><button type="button" class="icon-btn" data-close>✕</button></div>${docForm({ isNewLink: true })}
-    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div></form>`, {
-    onSubmit: (d) => { store.add('docs', { kind: 'link', name: d.name.trim(), url: d.url.trim(), folder: d.folder.trim() || 'General', description: d.description, uploadedByName: S.user.name }).catch(fail); },
-  }),
-  'edit-doc': (el) => {
-    const doc = S.docs.find((x) => x.id === el.dataset.id);
-    openModal(`<form><div class="modal-head"><h3>Edit document</h3><button type="button" class="icon-btn" data-close>✕</button></div>${docForm(doc)}
-      <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div></form>`, {
-      onSubmit: (d) => { store.update('docs', doc.id, { name: d.name.trim(), folder: d.folder.trim() || 'General', description: d.description, ...(d.url ? { url: d.url.trim() } : {}) }).catch(fail); },
-    });
-  },
-  'open-doc': (el) => openDoc(S.docs.find((x) => x.id === el.dataset.id)),
-  'dl-doc': (el) => openDoc(S.docs.find((x) => x.id === el.dataset.id), true),
-  'del-doc': async (el) => { const d = S.docs.find((x) => x.id === el.dataset.id); if (await confirmDialog(`Delete "${d.name}"?`)) store.deleteFile(d).catch(fail); },
-  'doc-folder': (el) => { S.docFolder = el.dataset.folder; renderView(true); },
   'add-person': openPersonModal,
   'del-person': async (el) => { if (await confirmDialog('Remove this contact?', 'Remove')) store.remove('people', el.dataset.id).catch(fail); },
   'notify-perm': async () => {
@@ -1144,7 +1078,7 @@ const actions = {
   },
   'hide-install': () => { localSet('hideInstall', '1'); renderView(true); },
   export: () => {
-    const data = { exportedAt: new Date().toISOString(), workspace: S.ws?.name, notes: S.notes, docs: S.docs, tasks: S.tasks, people: S.people };
+    const data = { exportedAt: new Date().toISOString(), workspace: S.ws?.name, notes: S.notes, docs: S.docs, tasks: S.tasks, people: S.people, savedItems: S.savedItems, collections: S.collections };
     download(`tasknest-backup-${todayISO()}.json`, JSON.stringify(data, null, 2), 'application/json');
   },
 };
@@ -1185,17 +1119,17 @@ document.addEventListener('submit', (e) => {
 
 document.addEventListener('input', (e) => {
   if (e.target.id === 'note-search') { S.noteSearch = e.target.value; renderNotes(currentRoute().id, true); }
-  if (e.target.id === 'doc-search') { S.docSearch = e.target.value; debouncedRefresh(); }
+  savedFeature?.onInput(e);
 });
 const debouncedRefresh = debounce(refresh, 150);
 
 document.addEventListener('change', async (e) => {
-  if (e.target.id === 'file-input') { await uploadFiles([...e.target.files]); e.target.value = ''; }
+  if (savedFeature?.onChange(e)) return;
   if (e.target.id === 'import-file') {
     const file = e.target.files[0]; if (!file) return;
     try {
       const data = JSON.parse(await file.text());
-      if (!(await confirmDialog(`Import ${data.notes?.length || 0} notes, ${data.docs?.length || 0} documents and ${data.tasks?.length || 0} tasks?`, 'Import'))) return;
+      if (!(await confirmDialog(`Import ${data.notes?.length || 0} notes, ${data.tasks?.length || 0} tasks and ${data.savedItems?.length || 0} saved items?`, 'Import'))) return;
       let skipped = 0;
       for (const c of COLLECTIONS) {
         for (const item of data[c] || []) {
@@ -1205,19 +1139,27 @@ document.addEventListener('change', async (e) => {
           await store.add(c, rest);
         }
       }
+      // Personal saved content: collection ids are remapped; uploaded file contents are not in backups.
+      const collMap = {};
+      for (const c of data.collections || []) { const { id, createdAt, updatedAt, userId, ...rest } = c; collMap[id] = await store.addMine('collections', rest); }
+      for (const item of data.savedItems || []) {
+        const { id, createdAt, updatedAt, userId, ...rest } = item;
+        if (rest.fileStorageKey) { skipped++; continue; }
+        rest.collectionIds = (rest.collectionIds || []).map((x) => collMap[x]).filter(Boolean);
+        await store.addMine('savedItems', rest);
+      }
       toast(skipped ? `Import complete. ${skipped} uploaded file(s) were skipped; upload them again.` : 'Import complete', 'ok');
     } catch (err) { fail(err); }
     e.target.value = '';
   }
 });
 
-document.addEventListener('dragover', (e) => { const z = e.target.closest?.('#drop-zone, .doc-grid'); if (z) { e.preventDefault(); $('#drop-zone')?.classList.add('over'); } });
-document.addEventListener('dragleave', (e) => { if (e.target.id === 'drop-zone') e.target.classList.remove('over'); });
+// Drag files onto the Saved Content page to save them.
+document.addEventListener('dragover', (e) => { if (['saved', 'share'].includes(currentRoute().r) && e.dataTransfer?.types?.includes('Files')) e.preventDefault(); });
 document.addEventListener('drop', (e) => {
-  const z = e.target.closest?.('#drop-zone, .doc-grid');
-  if (!z) return;
-  e.preventDefault(); $('#drop-zone')?.classList.remove('over');
-  uploadFiles([...e.dataTransfer.files]);
+  if (!['saved', 'share'].includes(currentRoute().r) || !e.dataTransfer?.files?.length) return;
+  e.preventDefault();
+  savedFeature.openSaveSheet({ files: [...e.dataTransfer.files] });
 });
 
 /* ═════════════════════════════ Install / service worker ═════════════════════════════ */
@@ -1235,7 +1177,8 @@ function registerSW() {
 function stopData() {
   S.unsubs.forEach((u) => u?.());
   S.unsubs = [];
-  COLLECTIONS.forEach((c) => { S[c] = []; S[c + 'Loaded'] = false; });
+  [...COLLECTIONS, ...MY_COLLECTIONS].forEach((c) => { S[c] = []; S[c + 'Loaded'] = false; });
+  S.savedError = '';
   S.ws = null;
   dailyShown = false;
 }
@@ -1253,6 +1196,13 @@ function startData() {
       refresh();
     }, (err) => fail(err)));
   });
+  // Private, per-user Saved Content.
+  MY_COLLECTIONS.forEach((c) => {
+    S.unsubs.push(store.subscribeMine(c, (items) => {
+      S[c] = items; S[c + 'Loaded'] = true; S.savedError = '';
+      refresh();
+    }, (err) => { S.savedError = err.code === 'permission-denied' ? 'Permission denied. Ask the app owner to publish the latest firestore.rules.' : err.message; refresh(); }));
+  });
 }
 
 async function boot() {
@@ -1260,6 +1210,11 @@ async function boot() {
   try {
     store = await createStore();
     store.onError = fail;
+    savedFeature = createSaved({
+      S, $, $$, esc, icon, toast, fail, openModal, closeModal, confirmDialog, timeAgo, fmtSize, download,
+      progressToast, empty, refresh, localGet, localSet, dataUrlToBlob, openLegacyDoc: openDoc, getStore: () => store,
+    });
+    Object.assign(actions, savedFeature.actions);
   } catch (err) {
     $('#app').innerHTML = `<div class="auth-wrap"><div class="auth-card"><h2>Can't connect</h2><p>${esc(err.message)}</p><p class="muted">Check your internet connection and reload.</p><button class="btn primary" onclick="location.reload()">Reload</button></div></div>`;
     return;

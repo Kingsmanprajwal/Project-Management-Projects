@@ -1,11 +1,11 @@
-# TaskNest – Notes, Docs & Deadlines
+# TaskNest – Notes, Saved Content & Deadlines
 
 TaskNest is a Notion-style team workspace that runs in any browser and installs like an app on Android, iPhone, Windows, Mac and Linux. It's a single Progressive Web App (PWA): one website that works on every device, with no app store needed.
 
 | Section | What it does |
 |---|---|
 | **Notes** | Notion-like pages: a title plus a rich-text body (headings, bold/italic, bullet and numbered lists, checklists, quotes, links). Autosaves, can be pinned and searched, and turns selected text into a task. |
-| **Documents** | Upload files (PDF, Word, Excel, images…) or save links (Google Drive, OneDrive…). Organise them in folders, search, preview and download. |
+| **Saved Content** | Your private library of things shared from other apps: Instagram Reels and posts, YouTube videos and Shorts, Facebook and LinkedIn posts, WhatsApp text, PDFs and Word files, Google Drive links, websites and images. Organise them into **collections** (like Instagram Saved), with notes, tags, favorites, archive, search and filters. |
 | **Ideas & To-Do** | Quick-add ideas and tasks. Switch between a **List**, a **Board** (To do → In progress → Done) and a **Calendar**. Every item shows how many days are left until its deadline. |
 | **Deadline Tracker** | A month calendar of all deadlines next to a countdown list grouped into *Overdue / Due today / Next 7 days / Later*, with days-left counters and progress bars. |
 | **Task Assigner** | Assign a task to a teammate with a deadline and a reminder time. The assignee gets an in-app or phone notification when the reminder is due. One tap also sends the reminder by **email**, **WhatsApp**, **Google Calendar** or a **.ics** calendar file. Shows each person's open and late tasks. |
@@ -64,7 +64,7 @@ Out of the box the app runs in **Local mode**: data is saved only on the device 
 
 8. Commit and push to `main`. The site redeploys automatically.
 
-The Firebase web config is meant to be public. Your data is protected by the Firestore rules: only members of a workspace can read or change its notes, documents and tasks.
+The Firebase web config is meant to be public. Your data is protected by the Firestore rules: only members of a workspace can read or change its notes and tasks, and each person's Saved Content is readable only by that person.
 
 **Team flow:**
 1. The first person signs up and creates a team workspace.
@@ -74,7 +74,7 @@ The Firebase web config is meant to be public. Your data is protected by the Fir
 
 The invite link in Settings still works as an alternative. Tasks can be assigned to anyone on the team, and reminders show on the assignee's own devices.
 
-> **After updating the app, re-publish `firestore.rules`** (Firestore → Rules → paste → Publish). Team access needs the new `allow list` rule.
+> **After updating the app, re-publish `firestore.rules`** (Firestore → Rules → paste → Publish). Team access and Saved Content need the latest rules.
 
 Firebase's free Spark plan covers small teams comfortably (50k reads and 20k writes per day, 1 GB storage).
 
@@ -85,6 +85,43 @@ Firebase's free Spark plan covers small teams comfortably (50k reads and 20k wri
 - The 📅 Google Calendar and ⬇ .ics buttons put the deadline in the person's phone calendar, so they get an alert even when TaskNest is closed.
 - Each time you open the app it also shows how many of your tasks are due today and how many are overdue.
 
+## Saved Content & collections
+
+**Saving something**
+- **Android (installed app):** in Instagram, YouTube, WhatsApp, Chrome or any app, tap **Share → TaskNest**. A save screen opens with a preview. Pick or create a collection, add notes or tags, and tap **Save**. Links, text, PDFs, Word/Excel/PowerPoint files and images are supported, including several files at once.
+- **iPhone, desktop, or Android without installing:** copy the link, open TaskNest, go to **Saved → + Save**, and tap **Paste**. You can also attach files, or drag them onto the Saved page on a computer.
+
+**What gets saved**
+- **Links:** the original URL, the detected platform (Instagram, YouTube, Facebook, LinkedIn, Google Drive, X, WhatsApp, website) and the content type (video, post, article, document).
+- **Shared text:** saved as a note. When it comes through the Share menu, WhatsApp is preselected as the source.
+- **Files:** stored privately, up to 10 MB each.
+- **Duplicates:** if you save the same link again (ignoring tracking parameters), you get a warning.
+
+**Previews**
+- YouTube thumbnails and titles come from YouTube's public oEmbed service.
+- Instagram, Facebook and LinkedIn only provide previews through their developer APIs (an app review and access token are needed), so their items show a clean platform-styled card instead.
+- Saving never depends on a preview working.
+- TaskNest stores the link, not the original video or post.
+
+**Collections**
+- **Ready-made:** *All Saved*, *Reels & Videos*, *Articles & Links*, *Documents & PDFs* and *Favorites* fill themselves automatically. A *Read Later* collection is created for you.
+- **Your own:** create collections with a name, description, icon, color and optional cover image.
+- **Organising:** an item can be in several collections. To move it, open the item and tap the collection chips.
+- **Removing and deleting:** removing an item from a collection, or deleting a whole collection, never deletes the item. It stays in All Saved.
+
+**Library**
+- Grid or list view.
+- Search across titles, links, notes and #tags.
+- Filter by source, type and collection, and sort by newest, oldest or title.
+- Favorites and Archived tabs.
+- From each item: edit, copy link, open original, download file, or delete.
+
+**Old team Documents.** The previous shared Documents section has been replaced. Anything already uploaded is kept untouched in Firebase. Saved Content shows a banner where anyone can open those files and **import** a private copy.
+
+**Privacy.**
+- Saved Content is private to each account. Teammates can't see it; this is enforced by `firestore.rules` under `users/{uid}/…`.
+- TaskNest only receives what you explicitly share to it. It never reads WhatsApp or other apps in the background.
+
 ## File size limit
 
 You can upload files up to **10 MB each**.
@@ -92,7 +129,7 @@ You can upload files up to **10 MB each**.
 - **Cloud mode:** each file is split into pieces of about 750 KB and stored in Firestore, so the free Spark plan is enough and no paid Firebase Storage is needed. The free plan includes 1 GB of storage in total, which is roughly 100 files of 10 MB.
 - **Local mode:** files are kept in the browser's file database (IndexedDB) on that device.
 
-For files over 10 MB, upload them to Google Drive/OneDrive and save the share link in **Documents → Add link**. The **Export data** backup includes file names and details but not the contents of uploaded files.
+For files over 10 MB, upload them to Google Drive/OneDrive and save the share link in **Saved Content → + Save**. The **Export data** backup includes file names and details but not the contents of uploaded files.
 
 ## Run locally
 
@@ -109,11 +146,12 @@ There is no build step: plain HTML, CSS and JavaScript modules.
 ```
 app/
   index.html              App shell
-  manifest.webmanifest    Install metadata (name, icons, colours)
-  sw.js                   Service worker (offline cache, notification clicks)
+  manifest.webmanifest    Install metadata (name, icons, colours, share_target)
+  sw.js                   Service worker (offline cache, Android share target, notification clicks)
   css/styles.css          Responsive styles (desktop sidebar, mobile bottom tabs, dark mode)
-  js/app.js               UI: notes, documents, to-do, tracker, assigner, settings
-  js/store.js             Data layer: Local mode (localStorage) or Cloud mode (Firebase)
+  js/app.js               UI shell: notes, to-do, tracker, assigner, settings, routing
+  js/saved.js             Saved Content: library, collections, save sheet, share handling
+  js/store.js             Data layer: Local mode (localStorage/IndexedDB) or Cloud mode (Firebase)
   js/firebase-config.js   Paste your Firebase config here
   icons/                  App icons
 firestore.rules           Firestore security rules

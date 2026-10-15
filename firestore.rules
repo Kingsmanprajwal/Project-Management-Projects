@@ -11,6 +11,36 @@ service cloud.firestore {
     // Each user can only read/write their own profile.
     match /users/{uid} {
       allow read, write: if signedIn() && request.auth.uid == uid;
+
+      // Saved Content: private to its owner. Nobody else (not even teammates) can read it.
+      match /savedItems/{id} {
+        allow read, delete: if isOwner(uid);
+        allow create, update: if isOwner(uid) && validSavedItem(request.resource.data);
+      }
+      match /collections/{id} {
+        allow read, delete: if isOwner(uid);
+        allow create, update: if isOwner(uid) && validCollection(request.resource.data);
+      }
+      match /fileChunks/{id} {
+        allow read, delete: if isOwner(uid);
+        allow create, update: if isOwner(uid)
+          && request.resource.data.bytes is bytes
+          && request.resource.data.bytes.size() <= 768000;
+      }
+    }
+
+    function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
+    function validSavedItem(d) {
+      return d.title is string && d.title.size() > 0 && d.title.size() <= 300
+        && d.userId == request.auth.uid
+        && (!('originalUrl' in d) || (d.originalUrl is string && d.originalUrl.size() <= 2048))
+        && (!('notes' in d) || (d.notes is string && d.notes.size() <= 20000))
+        && (!('tags' in d) || (d.tags is list && d.tags.size() <= 30))
+        && (!('collectionIds' in d) || (d.collectionIds is list && d.collectionIds.size() <= 100));
+    }
+    function validCollection(d) {
+      return d.name is string && d.name.size() > 0 && d.name.size() <= 60
+        && d.userId == request.auth.uid;
     }
 
     match /workspaces/{ws} {
